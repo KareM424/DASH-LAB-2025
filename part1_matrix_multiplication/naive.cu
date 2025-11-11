@@ -6,12 +6,9 @@
 
 #define N 1024
 #define SIZE (N * N)
-#define WARMUP_RUNS 5
-#define TIMING_RUNS 10
 #define BLOCK_SIZE 16
 
-// CUDA kernel for matrix multiplication (custom)
-__global__ void matrixMulKernel(float *A, float *B, float *C) {
+__global__ void naiveMatmul(const float *A, const float *B, float *C) {
   int row = blockIdx.y * blockDim.y + threadIdx.y;
   int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -24,120 +21,68 @@ __global__ void matrixMulKernel(float *A, float *B, float *C) {
   }
 }
 
-// Helper to initialize matrices
-void initializeMatrix(float *matrix, int rows, int cols) {
-  for (int i = 0; i < rows * cols; i++) {
-    matrix[i] = (float)(rand());
+void initializeMatrix(float *matrix) {
+  for (int i = 0; i < SIZE; i++) {
+    matrix[i] = (float)(rand() % 10);
   }
 }
 
 int main() {
-  size_t size_A = SIZE * sizeof(float);
-  size_t size_B = SIZE * sizeof(float);
-  size_t size_C = SIZE * sizeof(float);
+  size_t sizeBytes = SIZE * sizeof(float);
 
-  float *h_A = (float *)malloc(size_A);
-  float *h_B = (float *)malloc(size_B);
-  float *h_C = (float *)malloc(size_C);
-  float *h_C_cublas = (float *)malloc(size_C);
+  float *h_A = (float *)malloc(sizeBytes);
+  float *h_B = (float *)malloc(sizeBytes);
+  float *h_C = (float *)malloc(sizeBytes);
 
-  initializeMatrix(h_A, N, N);
-  initializeMatrix(h_B, N, N);
+  initializeMatrix(h_A);
+  initializeMatrix(h_B);
 
-  float *d_A, *d_B, *d_C, *d_C_cublas;
-  cudaMalloc(&d_A, size_A);
-  cudaMalloc(&d_B, size_B);
-  cudaMalloc(&d_C, size_C);
-  cudaMalloc(&d_C_cublas, size_C);
+  float *d_A, *d_B, *d_C;
+  cudaMalloc(&d_A, sizeBytes);
+  cudaMalloc(&d_B, sizeBytes);
+  cudaMalloc(&d_C, sizeBytes);
 
-  cudaMemcpy(d_A, h_A, size_A, cudaMemcpyHostToDevice);
-  cudaMemcpy(d_B, h_B, size_B, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_A, h_A, sizeBytes, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_B, h_B, sizeBytes, cudaMemcpyHostToDevice);
 
-  // Custom kernel launch parameters
   dim3 threadsPerBlock(BLOCK_SIZE, BLOCK_SIZE);
-  dim3 blocksPerGrid((N + threadsPerBlock.x - 1) / threadsPerBlock.x,
-                     (N + threadsPerBlock.y - 1) / threadsPerBlock.y);
+  dim3 blocksPerGrid((N + BLOCK_SIZE - 1) / BLOCK_SIZE,
+                     (N + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
-  // cuBLAS setup
-  cublasHandle_t handle;
-  cublasCreate(&handle);
-
-  float alpha = 1.0f;
-  float beta = 0.0f;
-
-  // ===== WARM-UP RUNS =====
-  for (int i = 0; i < WARMUP_RUNS; i++) {
-    matrixMulKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C);
-    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_B, N, d_A,
-                N, &beta, d_C_cublas, N);
-  }
-  cudaDeviceSynchronize();
-
-  // ===== TIMING CUSTOM KERNEL =====
   cudaEvent_t start, stop;
   cudaEventCreate(&start);
   cudaEventCreate(&stop);
 
-  float customTimeMs = 0;
-  for (int i = 0; i < TIMING_RUNS; i++) {
+  float timeMs = 0;
+  for (int i = 0; i < 10; i++) {
     cudaEventRecord(start);
-    matrixMulKernel<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C);
+    naiveMatmul<<<blocksPerGrid, threadsPerBlock>>>(d_A, d_B, d_C);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
 
     float elapsed;
     cudaEventElapsedTime(&elapsed, start, stop);
-    customTimeMs += elapsed;
+    timeMs += elapsed;
   }
-  customTimeMs /= TIMING_RUNS;
+  timeMs /= 10;
 
-  cudaMemcpy(h_C, d_C, size_C, cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_C, d_C, sizeBytes, cudaMemcpyDeviceToHost);
 
-  // ===== TIMING cuBLAS =====
-  float cublasTimeMs = 0;
-  for (int i = 0; i < TIMING_RUNS; i++) {
-    cudaEventRecord(start);
-    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, N, N, N, &alpha, d_B, N, d_A,
-                N, &beta, d_C_cublas, N);
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
+  long long totalFlops = 2LL * N * N * N;
+  float gflops = (totalFlops / (timeMs / 1000.0f)) / 1e9f;
 
-    float elapsed;
-    cudaEventElapsedTime(&elapsed, start, stop);
-    cublasTimeMs += elapsed;
-  }
-  cublasTimeMs /= TIMING_RUNS;
+  printf("Naive Kernel:\n");
+  printf("  Time: %.3f ms\n", timeMs);
+  printf("  GFLOPS: %.2f\n", gflops);
 
-  cudaMemcpy(h_C_cublas, d_C_cublas, size_C, cudaMemcpyDeviceToHost);
-
-  // ===== CALCULATE AND DISPLAY RESULTS =====
-  long long total_flops = 2LL * N * N * N;
-
-  float customGFLOPS = (total_flops / (customTimeMs / 1000.f)) / 1e9f;
-  float cublasGFLOPS = (total_flops / (cublasTimeMs / 1000.f)) / 1e9f;
-
-  printf("Custom Kernel Performance:\n");
-  printf("  Average Time: %.3f ms\n", customTimeMs);
-  printf("  GFLOPS: %.2f\n\n", customGFLOPS);
-
-  printf("cuBLAS SGEMM Performance:\n");
-  printf("  Average Time: %.3f ms\n", cublasTimeMs);
-  printf("  GFLOPS: %.2f\n\n", cublasGFLOPS);
-
-  printf("Speedup (cuBLAS over custom): %.2fx\n", customTimeMs / cublasTimeMs);
-
-  // Clean up
   cudaEventDestroy(start);
   cudaEventDestroy(stop);
-  cublasDestroy(handle);
   cudaFree(d_A);
   cudaFree(d_B);
   cudaFree(d_C);
-  cudaFree(d_C_cublas);
   free(h_A);
   free(h_B);
   free(h_C);
-  free(h_C_cublas);
 
   return 0;
 }
